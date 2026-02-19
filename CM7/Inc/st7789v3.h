@@ -4,7 +4,7 @@
 
 #define SHARED_ARRAY_SIZE		10;
 
-//For SPI 4-wire with DMA and dual buffer
+//For SPI 4-wire with DMA
 
 class st7789v3 {
 private:
@@ -13,10 +13,14 @@ private:
 	void setRstPin();
 	void resetRstPin();
 	void initPeripherals();
-public:
-	static const uint32_t MAX_ROWS = 320;
-	static const uint32_t MAX_COLS = 240;
 
+	bool initialized = false;
+public:
+	static const uint32_t IC_MAX_ROWS = 320;	//For the IC, max rows is 320
+	static const uint32_t IC_MAX_COLS = 240;	//For the IC, max cols is 240
+	static const uint32_t MAX_ROWS = 320;		//For my display, max rows is 320
+	static const uint32_t MAX_COLS = 172;		//For my display, max cols is 172
+	static const uint32_t COL_OFFS = 34;		//The offset for this is 34
 	enum class commands {
 		//System Function Control Table 1
 		NOP = 		0x00,		//NO OP
@@ -109,33 +113,58 @@ public:
 	void disableBacklight();
 
 	st7789v3(){
-		initPeripherals();
-		resetRstPin();
-		setRstPin();
+		if (!initialized){
+			initialized = true;
+			initPeripherals();
+			resetRstPin();
+			setRstPin();
+		}
 	}
     void sendCommand(st7789v3::commands command, bool waitForTx=true);
     void sendData(uint8_t* buff, uint32_t dataLength, bool waitForTx=true);
     void waitTxComplete();
     bool ongoingTx();
 
-    void setColumnAddr(uint16_t xStart, uint16_t xEnd){
+    //By default, column address is the x-axis. (col,row)
+    void setColAddr(uint16_t colStart, uint16_t colEnd){
+    	colStart += COL_OFFS;
+    	colEnd += COL_OFFS;
     	sendCommand(st7789v3::commands::CASET);
         uint8_t x[4] = {
-            static_cast<uint8_t>((xStart >> 8) & 0xFF),  // MSB
-            static_cast<uint8_t>( xStart        & 0xFF), // LSB
-            static_cast<uint8_t>((xEnd   >> 8) & 0xFF),  // MSB
-            static_cast<uint8_t>( xEnd          & 0xFF)  // LSB
+            (uint8_t)((colStart >> 8) & 0xFF),  // MSB
+            (uint8_t)( colStart        & 0xFF), // LSB
+            (uint8_t)((colEnd   >> 8) & 0xFF),  // MSB
+            (uint8_t)( colEnd          & 0xFF)  // LSB
         };
     	sendData(x, 4);
     }
-    void setRowAddr(uint16_t yStart, uint16_t yEnd){
+
+    //By default, row address is the y-axis. (col,row)
+    void setRowAddr(uint16_t rowStart, uint16_t rowEnd){
     	sendCommand(st7789v3::commands::RASET);
         uint8_t y[4] = {
-            static_cast<uint8_t>((yStart >> 8) & 0xFF),
-            static_cast<uint8_t>( yStart        & 0xFF),
-            static_cast<uint8_t>((yEnd   >> 8) & 0xFF),
-            static_cast<uint8_t>( yEnd          & 0xFF)
+            (uint8_t)((rowStart >> 8) & 0xFF),
+            (uint8_t)( rowStart        & 0xFF),
+            (uint8_t)((rowEnd   >> 8) & 0xFF),
+            (uint8_t)( rowEnd          & 0xFF)
         };
     	sendData(y, 4);
+    }
+    //Fills the screen with the specified color.
+    //The data for the color needs to already have its byte order reversed.
+    void fill(const uint16_t colorData){
+    	setColAddr(0, MAX_COLS - 1);
+    	setRowAddr(0, MAX_ROWS - 1);
+    	setColAddr(0, MAX_COLS - 1);
+    	setRowAddr(0, MAX_ROWS - 1);
+    	sendCommand(st7789v3::commands::RAMWR);
+    	uint16_t buff[MAX_COLS] = {0};
+    	for (unsigned int i = 0; i < MAX_COLS; i++){
+    		buff[i] = colorData;
+    	}
+    	for (unsigned int i = 0; i < MAX_ROWS; i++){
+    		sendData((uint8_t *) &buff, MAX_COLS*2);
+    	}
+    	sendCommand(st7789v3::commands::NOP);
     }
 };

@@ -190,7 +190,7 @@ void inline nvic_clearItrPending(H755_itrPos itr){
 
 //Returns true if interrupt is active or active and pending
 bool inline nvic_isItrActive(H755_itrPos itr){
-	return NVIC.IABRx[(uint8_t) itr / 32] & ((uint8_t) itr%32);
+	return NVIC.IABRx[(uint8_t) itr / 32] & (1 << (uint8_t) itr%32);
 }
 
 //Changes the priority of an interrupt
@@ -201,5 +201,11 @@ void inline nvic_setItrPriority(H755_itrPos itr, uint8_t priority){
 //Generates an interrupt for an interrupt through software.
 //This needs privileged access or USERSETMPEND enabled in CCR.
 void inline nvic_softTrigItr(H755_itrPos itr){
-	NVIC.STIR = (uint8_t) itr;
+	NVIC.STIR &= ~0xFF;
+	NVIC.STIR |= (uint8_t) itr;
+}
+
+//Returns true if the interrupt is enabled.
+bool inline nvic_isItrEnabled(H755_itrPos itr){
+	return NVIC.ISERx[(uint8_t) itr / 32] & (1 << (uint8_t) itr%32);
 }

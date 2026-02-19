@@ -9,131 +9,125 @@
 #include <dmamux.h>
 
 #include <fft.h>
+#include <color.h>
+
+#include <cmath>
+
+#include <dma2d.h>
+
+extern "C" {
+void ADC1_2_IRQHandler(void){
+
+}
+}
+
+//Global Variables
+
+st7789v3 display;
+uint16_t displayBuffer [display.MAX_ROWS * display.MAX_COLS] = {0};
+uint32_t adcBuff[2*100];
+
+//Function Prototypes
 
 void init_st7789v3();
 void init_ADC();
 
-void swapBuffer();
-void sendCurrentBuffer();
+uint16_t _REV16(const uint16_t x);
+float clampThenNormalize(float x, const float min, const float max);
+rgb565 genColor(Msh lowMsh, Msh highMsh, float x);
+void displayColorMap(Msh lowMsh, Msh highMsh);
+void sendDisplayBuffer();
+void spectrogramTest();
 
-st7789v3 display;
+void dma2dTest(){
 
-	uint32_t adcBuff[2*100];
-//	reallocPeripheral(APB1L_Peripheral::tim3);
-//	tim_prescale(TIM3, 64); //Timer 3 set to 1MHz
-//	tim_enable(TIM3);
-//	init_ADC();
-//	adc_start(ADC1);
+	sendDisplayBuffer();
+	while(display.ongoingTx());
 
-//Returns the reverse bit of a number for a certain number of bits
-uint16_t _REV16(uint16_t x){
-	uint16_t res;
-	__asm(
-		"REV16 %[result], %[input_x]"
-		: [result] "=r" (res)
-		: [input_x] "r" (x)
-	);
-	return res;
+	uint16_t buff[display.MAX_COLS * display.MAX_ROWS] = {0};
+	uint16_t red = _REV16(rgb565(31,0,0).data);
+	uint16_t blue = _REV16(rgb565(0,0,31).data);
+	for (uint32_t x = 0; x < display.MAX_COLS; x++){
+		for (uint32_t y = 0; y < display.MAX_ROWS; y++){
+			if (x < display.MAX_COLS / 2)
+				buff[y*display.MAX_COLS + x] = red;
+			else
+				buff[y*display.MAX_COLS + x] = blue;
+		}
+	}
+
+	sendDisplayBuffer();
+	while(display.ongoingTx());
+
+	reallocPeripheral(AHB3_Peripheral::dma2d);
+	DMA2D_CR_CFG crcfg;
+	crcfg.MODE = DMA2D_Mode::Mem2Mem_FGFetchOnly;
+	dma2d_config(crcfg);
+
+	DMA2D_PFC_CFG pfccfg;
+	pfccfg.CM = DMA2D_PFC_ColorMode::RGB565;
+	dma2d_fg_cfgPFC(pfccfg);
+
+	dma2d_fg_setMemAddr((uint32_t) buff);
+	dma2d_out_setMemAddr((uint32_t) displayBuffer);
+	dma2d_fg_setOffset(0);
+	dma2d_out_setOffset(0);
+	dma2d_setNumLines(display.MAX_ROWS, display.MAX_COLS);
+
+	dma2d_start();
+	while(!dma2d_isr_status(DMA2D_ISR::TCIF));
+	dma2d_isr_clear(DMA2D_ISR::TCIF);
+	sendDisplayBuffer();
+	while(display.ongoingTx());
+
+	dma2d_fg_setMemAddr((uint32_t) buff);
+	dma2d_out_setMemAddr((uint32_t) &displayBuffer[30]);
+	dma2d_fg_setOffset(30);
+	dma2d_out_setOffset(30);
+	dma2d_setNumLines(display.MAX_ROWS, display.MAX_COLS - 30);
+
+	dma2d_start();
+	while(!dma2d_isr_status(DMA2D_ISR::TCIF));
+	dma2d_isr_clear(DMA2D_ISR::TCIF);
+	sendDisplayBuffer();
+	while(display.ongoingTx());
 }
 
-
-union rgb16 {
-	//This is ordered bgr so that the bytes are sent correctly through SPI. Make sure to reverse the byte order to send correctly.
-	struct rgb565 {
-		uint16_t b : 5;
-		uint16_t g : 6;
-		uint16_t r : 5;
-	} rgb;
-	uint16_t data;
-};
 
 int main(void)
 {
-	const int N = 16;
-	const int L = 8;
-	const int O = 4;
-
-    complex x[N] = {
-        1,0,
-        2,0,
-        1,0,
-        2,0,
-        3,0,
-        2,0,
-        1,0,
-        2,0,
-        1,0,
-        0,0,
-        1,0,
-        2,0,
-        3,0,
-        1,0,
-        2,0,
-        3,0
-    };
-
-    float w[L];
-    int H = L - O;
-    int frames = 1 + (N-L) / (L-O);
-
-    complex v[L] = {0};
-    hanning(L,w);
-    float X[frames][N/2 + 1] = {0};
-
-    for (int f = 0; f < frames; f++){
-        for (int m = 0; m < L; m++){
-            v[m].real = w[m] * x[m + f*H].real;
-        }
-        fft<L>(v);
-        reversePermute(v, L, log2floor(L));
-        magnitude(v, X[f], L);
-    }
-
+	//	reallocPeripheral(APB1L_Peripheral::tim3);
+	//	tim_prescale(TIM3, 64); //Timer 3 set to 1MHz
+	//	tim_enable(TIM3);
+	//	init_ADC();
+	//	adc_start(ADC1);
 	init_st7789v3();
-
-	rgb16 color = {0};
-	display.setColumnAddr(0, display.MAX_COLS - 1);
-	display.setRowAddr(0, display.MAX_ROWS - 1);
-
-	display.sendCommand(st7789v3::commands::RAMWR);
-	for (uint32_t i = 0; i < display.MAX_COLS*display.MAX_ROWS; i++){
-		display.sendData((uint8_t*) &color.data, 2);
-	}
-
-	display.setColumnAddr(display.MAX_COLS/4, 3*display.MAX_COLS/4 - 1);
-	display.setRowAddr(display.MAX_ROWS/4, 3*display.MAX_ROWS/4 - 1);
-	display.sendCommand(st7789v3::commands::RAMWR);
-
-
+//	dma2dTest();
 	while(true){
-		color.rgb.g = 0;
-		color.rgb.r = 0;
-		color.rgb.b = 0;
-		for (int i = 0; i < 32; i++){
-			for (int i = 0 ; i < 600; i++){
-				uint16_t data = _REV16(color.data);
-				display.sendData((uint8_t*) &data, 2);
-			}
-			color.rgb.g =  16*(0.5 - 0.5*cosf((2*MATH_PI*(i))/(32-1)));
-			color.rgb.r = 28*(0.5 - 0.5*cosf((2*MATH_PI*(i+32))/(128-1)));
-			color.rgb.b = 24*(0.5 - 0.5*cosf((2*MATH_PI*(i+16))/(64-1)));
-		}
+
 	}
 }
 
+//Function Implementations
 
 void init_st7789v3(){
+	//Start up sequence for the display
 	display.enableBacklight();
 	display.sendCommand(st7789v3::commands::SWRESET, false);
 	display.sendCommand(st7789v3::commands::SLPOUT);
 	display.sendCommand(st7789v3::commands::NORON);
 	display.sendCommand(st7789v3::commands::DISPON);
 	display.sendCommand(st7789v3::commands::INVON);
+
+	//Set RGB and Control interface color format to 16-bit
 	display.sendCommand(st7789v3::commands::COLMOD);
 	uint8_t colmod = 0x55;
 	display.sendData(&colmod, 1);
+
+	//Set to BGR order and default data direction
+	//Bits: X MY MX MV ML RGB MH X X
 	display.sendCommand(st7789v3::commands::MADCTL);
-	uint8_t madctl = 0b000000000;
+	uint8_t madctl = 0b00001000;
 	display.sendData(&madctl, 1);
 }
 
@@ -186,4 +180,136 @@ void init_ADC(){
 
 	tim_enable(TIM2);
 	dma1_enableStream(DMA_Stream::Stream1);
+}
+
+//Returns the reverse byte order 16-bit data
+uint16_t _REV16(const uint16_t x){
+	uint16_t res;
+	__asm(
+		"REV16 %[result], %[input_x]"
+		: [result] "=r" (res)
+		: [input_x] "r" (x)
+	);
+	return res;
+}
+
+//Returns x normalized and clamped within range parameters specified in the function body
+//Output is between 0.0 and 1.0
+float clampThenNormalize(float x, const float min, const float max){
+	const float range = (max - min) > 0 ? (max - min) : (min - max);
+
+	//Clamp x between max/min
+	x = (x > max) ? max : x;
+	x = (x < min) ? min : x;
+
+	//Add to x absolute value of min
+	x = (min < 0) ? x - min : x + min;
+
+	return x / range;
+}
+
+rgb565 genColor(Msh lowMsh, Msh highMsh, float x){
+	return sRGBCompanding(Msh2RGB(interpolateColor(lowMsh, highMsh, x)));
+}
+
+void displayColorMap(Msh lowMsh, Msh highMsh){
+	uint16_t buff[display.MAX_COLS];
+
+	display.setColAddr(0, display.MAX_COLS - 1);
+	display.setRowAddr(0, display.MAX_ROWS - 1);
+
+	display.sendCommand(st7789v3::commands::RAMWR);
+	for (uint32_t i = 0; i < display.MAX_ROWS; i++){
+		float interp = i / (float) (display.MAX_ROWS - 1);
+		rgb565 color = sRGBCompanding(Msh2RGB(interpolateColor(lowMsh, highMsh, interp)));
+		uint16_t data = _REV16(color.data);
+		for (uint32_t j = 0; j < display.MAX_COLS; j++){
+			buff[j] = data;
+		}
+		display.sendData((uint8_t *) &buff, display.MAX_COLS * 2);
+	}
+}
+
+//Display buffer is whole screen.
+void sendDisplayBuffer(){
+	display.sendCommand(st7789v3::commands::NOP);
+	display.setColAddr(0, display.MAX_COLS - 1);
+	display.setRowAddr(0, display.MAX_ROWS - 1);
+	display.sendCommand(st7789v3::commands::RAMWR);
+	display.sendData(&((uint8_t *)&displayBuffer[0])[0], 65535);
+	display.sendData(&((uint8_t *)&displayBuffer[0])[65535], 44545);
+	display.sendCommand(st7789v3::commands::NOP);
+}
+
+void spectrogramTest(){
+	const int N = 512;
+	const int L = 128;
+	const int O = 115;
+
+	uint32_t freq = 1000;
+	uint32_t Fs = 16000;
+	float theta = (2.0 * MATH_PI * freq) / Fs;
+
+	complex x[N];
+	for (uint32_t n = 0; n < N; n++){
+		if (n % 100 < 50)
+			x[n].real = 1;
+		else
+			x[n].real = -1;
+		x[n].imag = 0;
+	}
+
+    float w[L];
+    uint32_t H = L - O;
+    uint32_t frames = 1 + (N-L) / (H);
+    uint32_t l = L/2 + 1; //Only the first half + 1 of each frame is needed for the spectrogram
+
+    complex v[L] = {0};
+    hanning(L,w);
+    float X[frames][l] = {0};
+
+    for (uint32_t f = 0; f < frames; f++){
+        for (int m = 0; m < L; m++){
+            v[m].real = w[m] * x[m + f*H].real;
+            v[m].imag = 0;
+        }
+        fft<L>(v);
+        reversePermute(v, L, log2floor(L));
+        magnitude(v, X[f], l);
+    }
+
+
+    const Msh highMsh = RGB2Msh(invsRGBCompanding(rgb565(27,5,2)));
+    const Msh lowMsh = RGB2Msh(invsRGBCompanding(rgb565(3,7,24)));
+
+    rgb565 specRGB[frames][l];
+
+	const float max = 10.0;
+	const float min = 0.0;
+	for (uint32_t  f = 0; f < frames; f++){
+		for (uint32_t i = 0; i < l; i++){
+			X[f][i] = clampThenNormalize(X[f][i], min, max);
+			specRGB[f][i] = genColor(lowMsh, highMsh, X[f][i]);
+		}
+	}
+
+	//Black out screen
+	display.fill(0x0000);
+
+	const uint32_t sizeX = 4;
+	const uint32_t sizeY = 4;
+	for (uint32_t f = 0; f < frames; f++){
+		uint32_t xIdx = f * sizeX;
+		for (uint32_t i = 0; i < l; i++){
+			uint32_t yIdx = i * sizeY;
+			uint16_t data = _REV16(specRGB[f][i].data);
+			for (uint32_t y = yIdx; y < sizeY + yIdx; y++){
+				for (uint32_t x = xIdx; x < sizeX + xIdx; x++){
+					displayBuffer[y*display.MAX_COLS + x] = data;
+				}
+			}
+		}
+	}
+
+	sendDisplayBuffer();
 }

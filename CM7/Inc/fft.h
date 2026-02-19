@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <cmath>
 
-#define MATH_PI 3.14159265358979323846264338327950288419716939937510
+#define MATH_PI 3.14159265358979323846264338327950288419716939937510f
 
 uint32_t log2floor(uint32_t x){
 	uint32_t res = 0;
@@ -120,21 +120,21 @@ void rfft(complex x[], complex y[]){
         x[(N-n) % N].imag = mirrorxn.imag - currentxn.imag;
     }
     for (unsigned int n = 0; n < N; n++){
-        y[n].real *= 0.5;
-        y[n].imag *= 0.5;
-        x[n].real *= 0.5;
-        x[n].imag *= 0.5;
+        y[n].real *= 0.5f;
+        y[n].imag *= 0.5f;
+        x[n].real *= 0.5f;
+        x[n].imag *= 0.5f;
     }
 }
 
 void hanning(int M, float w[]){
     for (int m = 0; m < M; m++){
-        w[m] = 0.5 - 0.5*cosf((2*MATH_PI*m)/(M-1));
+        w[m] = 0.5f - 0.5f*cosf((2*MATH_PI*m)/(M-1));
     }
 }
 
 void magnitude(complex x[], float res[], uint32_t N){
     for (uint32_t n = 0; n < N; n++){
-        res[n] = sqrtf(powf(x[n].real, 2) + powf(x[n].imag, 2));
+        res[n] = sqrtf(powf(x[n].real, 2.0f) + powf(x[n].imag, 2.0f));
     }
 }

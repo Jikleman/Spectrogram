@@ -45,6 +45,7 @@ MEMORY
 {
 FLASH (rx)     : ORIGIN = 0x08100000, LENGTH = 1024K
 RAM (xrw)      : ORIGIN = 0x10000000, LENGTH = 288K
+RAM_D3 (xrw)   : ORIGIN = 0x38000000, LENGTH = 64K
 }
 
 /* Define output sections */
@@ -161,7 +162,12 @@ SECTIONS
     . = ALIGN(8);
   } >RAM
 
-
+  .shared_memory (NOLOAD):
+  {
+  	. = ALIGN(4);
+  	*(.shared_memory)
+  	. = ALIGN(4);
+  } > RAM_D3
 
   /* Remove information from the standard libraries */
   /DISCARD/ :

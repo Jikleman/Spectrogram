@@ -185,6 +185,13 @@ SECTIONS
     *(.dtcm_ram)
     . = ALIGN(4);
   } >DTCMRAM
+  
+  .shared_memory (NOLOAD):
+  {
+  	. = ALIGN(4);
+  	*(.shared_memory)
+  	. = ALIGN(4);
+  } > RAM_D3
 
   /* Remove information from the compiler libraries */
   /DISCARD/ :

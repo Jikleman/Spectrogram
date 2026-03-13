@@ -12,6 +12,7 @@
 #include <cmath>
 
 #define shared	__attribute__ ((section(".shared_memory")))
+#define dtcm	__attribute__ ((section(".dtcm_ram")))
 
 
 //Shared data
@@ -19,7 +20,7 @@
 //4096 words (16Kb) per buffer
 volatile bool M4_Signal;
 const uint32_t buffCol = 128;
-const uint32_t buffRow = 32;
+const uint32_t buffRow = 4;
 const uint32_t buffSize = buffCol * buffRow;
 template <typename T, uint32_t buffSize>
 struct dBuff{
@@ -33,16 +34,13 @@ uint32_t currentBuff;
 
 //Global Variables
 
-const uint32_t N = 256;
-const uint32_t L = 128;
-const uint32_t O = 32;
-const uint32_t adcBuffSize = N + (L - O);
+//const uint32_t N = 256;
+//const uint32_t L = 128;
+//const uint32_t O = 32;
+//
+//static_assert(N > L, "N cannot be less than L");
+//static_assert(L > O, "FFT length (L) cannot be less than overlap (O)");
 
-static_assert(N > L, "N cannot be less than L");
-static_assert(L > O, "FFT length (L) cannot be less than overlap (O)");
-
-uint32_t adcBuff0[adcBuffSize];
-uint32_t adcBuff1[adcBuffSize];
 uint32_t adcBuff;
 
 //Function Prototypes
@@ -53,8 +51,38 @@ void init_ADC();
 void swapBuffers();
 void signal_M4();
 
-void calculateSpec(){
+/*Attempts to swap between the shared buffers.
+* If M4 is not ready for swap, swap fails and false is returned.
+* True is returned on a successful swap.
+*/
+bool try_syncBufferSwap(){
+	//Check if both CPUs are ready
+	if(sharedBuff.M7_Done && sharedBuff.M4_Done) {
+		//Switch buffers and do synchronization tasks
+		swapBuffers();
+		signal_M4();
 
+		//Wait for M4 to be ready
+		while(!M4_Signal) {};
+		M4_Signal = false;
+		sharedBuff.M7_Done = false;
+
+		return true;
+	}
+	return false;
+}
+
+//Contains the initialization for shared buffer synchronization
+void syncInit(){
+	//Wait for M4 to be ready
+	while(!HSEM_isC2ItrEnabled(0));
+	allocatePeripheral(AHB4_Peripheral::hsem);
+	nvic_enableItr(H755_itrPos::hsem0);
+	HSEM_enableC1Itr(1);
+
+	M4_Signal = false;
+	currentBuff = 1;
+	sharedBuff.M7_Done = false;
 }
 
 //IRQ handlers
@@ -80,43 +108,107 @@ int main(void)
 	//	init_ADC();
 	//	adc_start(ADC1);
 
-	//Wait for M4 to be ready
-	while(!HSEM_isC2ItrEnabled(0));
-	allocatePeripheral(AHB4_Peripheral::hsem);
-	nvic_enableItr(H755_itrPos::hsem0);
-	HSEM_enableC1Itr(1);
+	uint32_t Fs = 10000;
+	uint32_t freq = 1000;
+	float theta = (2.0f * MATH_PI * freq) / Fs;
 
-	M4_Signal = false;
-	currentBuff = 1;
-	sharedBuff.M7_Done = false;
+	constexpr uint32_t N = 512;
+	constexpr uint32_t L = 128;
+	constexpr uint32_t O = 64;
+	constexpr uint32_t H = L - O;
+	constexpr uint32_t frames = 1 + (N-L) / (H);
+	constexpr uint32_t l = L/2 + 1; //Only the first half + 1 of each frame is needed for the spectrogram
+
+	static dtcm float x[N];
+	static dtcm float w[L];
+	static dtcm complex v[L];
+	static dtcm float X[frames][l] = {0};
+
+	hanning(L, w);
+
+	//Wait for M4 to be ready then signal to M4
+	syncInit();
+
+	uint32_t k = 0;
+	for (uint32_t n = 0; n < N; n++){
+		x[n] = cosf(theta * k);
+		k++;
+	}
+	uint32_t sharedBuffIdx = 0;
+	const static auto calcSpec = [&](){
+		//Compute spectrogram
+		for (uint32_t f = 0; f < frames; f++){
+			for (uint32_t m = 0; m < L; m++){
+				v[m].real = w[m] * x[m + f*H];
+				v[m].imag = 0;
+			}
+			fft<L>(v);
+			reversePermute(v, L, log2floor(L));
+			magnitude(v, X[f], l);
+		}
+	};
+
+	const static auto prepare_x = [&](){
+		//Copy the elements from x needed for the overlap of the next frame to the start
+		for (uint32_t n = 0; n < O; n++){
+			x[n] = x[N - O + n];
+		}
+		//Write the elements for next frames
+		for (uint32_t n = O; n < N; n++){
+			x[n] = cosf(theta * k);
+			k++;
+		}
+	};
 
 	while(true){
-		//Wait for both CPUs to be ready
-		if(!(sharedBuff.M7_Done && sharedBuff.M4_Done)) {
-			//Switch buffers and do synchronization tasks
-			swapBuffers();
-			sharedBuff.M7_Done = false;
-			signal_M4();
+		calcSpec();
+		prepare_x();
 
-			//Wait for M4 to be ready
-			while(!M4_Signal) {};
-			M4_Signal = false;
+		bool transferingData = true;
+		uint32_t f = 0;
+		uint32_t n = 0;
 
-			//Do task
-		}
-		if (!sharedBuff.M7_Done){
+		struct excessDataInfo{
+			uint32_t f;
+			uint32_t n;
+		};
+
+		//Lambda for moving data to shared buffer. Used for return and capture functionality
+		const static auto moveData = [&](volatile float* buff) -> excessDataInfo{
+			for (;f < frames; f++){
+				for (;n < l; n++){
+					buff[sharedBuffIdx++] = X[f][n];
+					if (sharedBuffIdx == buffSize){
+						return excessDataInfo {f, n + 1};
+					}
+				}
+			}
+			return excessDataInfo {f,n};
+		};
+
+		while(transferingData){
+			excessDataInfo info;
 			if (currentBuff == 0){
-
+				info = moveData(sharedBuff.buff0);
 			}
 			if (currentBuff == 1){
+				info = moveData(sharedBuff.buff1);
+			}
 
+			//If buffer is full, wait to swap buffers with M4 then finish sending data.
+			if (info.f < (frames-1) || info.n < (l-1)){
+				sharedBuffIdx = 0;
+				sharedBuff.M7_Done = true;
+				while(!try_syncBufferSwap()) {}
+			} else {
+				transferingData = false;
 			}
 		}
-
 	}
 }
 
 //Function Implementations
+
 void init_ADC(){
 	reallocPeripheral(AHB1_Peripheral::adc1_adc2);
 	reallocPeripheral(AHB1_Peripheral::dma1);
@@ -176,8 +268,8 @@ void swapBuffers(){
 }
 
 void signal_M4(){
-	HSEM_readLock(HSEM_CoreID::MASTER1, 1);
-	HSEM_unlock(HSEM_CoreID::MASTER1, 0, 1);
+	HSEM_readLock(HSEM_CoreID::MASTER0, 0);
+	HSEM_unlock(HSEM_CoreID::MASTER0, 0, 0);
 }
 
 //void spectrogramTest(){

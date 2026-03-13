@@ -15,7 +15,7 @@
 //4096 words (16Kb) per buffer
 volatile bool M7_Signal;
 const uint32_t buffCol = 128;
-const uint32_t buffRow = 32;
+const uint32_t buffRow = 4;
 const uint32_t buffSize = buffCol * buffRow;
 template <typename T, uint32_t buffSize>
 struct dBuff{
@@ -37,13 +37,48 @@ uint16_t displayBuffer[display.MAX_COLS * display.MAX_ROWS];
 void sendDisplayBuffer();
 void dma2dTest();
 void displayColorMap(Msh lowMsh, Msh highMsh);
-void dma2dTest();
 float clampThenNormalize(float x, const float min, const float max);
 rgb565 genColor(Msh lowMsh, Msh highMsh, float x);
 uint16_t _REV16(const uint16_t x);
+void init_st7789v3();
 
 void signal_M7();
 void swapBuffers();
+
+/*Attempts to swap between the shared buffers.
+* If M7 is not ready for swap, swap fails and false is returned.
+* True is returned on a successful swap.
+*/
+bool try_syncBufferSwap(){
+	//Check if both CPUs are ready
+	if(sharedBuff.M7_Done && sharedBuff.M4_Done) {
+		//Switch buffers and do synchronization tasks
+		swapBuffers();
+		signal_M7();
+
+		//Wait for M4 to be ready
+		while(!M7_Signal) {};
+		M7_Signal = false;
+		sharedBuff.M4_Done = false;
+
+		return true;
+	}
+	return false;
+}
+
+//Contains M4 initialization for buffer synchronization
+void syncInit(){
+	reallocPeripheral(AHB4_Peripheral::hsem);
+	nvic_enableItr(H755_itrPos::hsem1);
+	HSEM_enableC2Itr(0);
+
+	//Wait for M7 to be ready
+	while(!HSEM_isC1ItrEnabled(1));
+
+	M7_Signal = false;
+	currentBuff = 0;
+	sharedBuff.M4_Done = false;
+}
 
 //IRQ handlers
 
@@ -54,34 +89,110 @@ void HSEM1_IRQHandler(void){
 }
 }
 
+#define CPACR				(*(volatile unsigned int *) 0xE000ED88)
+
 int main(void)
 {
-	reallocPeripheral(AHB4_Peripheral::hsem);
-	nvic_enableItr(H755_itrPos::hsem1);
-	HSEM_enableC2Itr(0);
+	//Set full access privilege to enable FPU
+	CPACR |= (0xF << 20);
 
-	//Wait for M7 to be ready
-	while(!HSEM_isC1ItrEnabled(0));
+	Msh highMsh = RGB2Msh(invsRGBCompanding(rgb565(27,5,2)));
+	Msh lowMsh = RGB2Msh(invsRGBCompanding(rgb565(3,7,24)));
 
-	M7_Signal = false;
-	currentBuff = 0;
-	sharedBuff.M4_Done = false;
+	constexpr uint32_t N = 512;
+	constexpr uint32_t L = 128;
+	constexpr uint32_t O = 64;
+	constexpr uint32_t H = L - O;
+	constexpr uint32_t frames = 1 + (N-L) / (H);
+	constexpr uint32_t l = L/2 + 1; //Only the first half + 1 of each frame is needed for the spectrogram
+
+	rgb565 specRGB[frames][l];
+	static float X[frames][l];
+
+	init_st7789v3();
+
+	//Black out screen
+	display.fill(0x0000);
+
+	syncInit();
+
+	sharedBuff.M4_Done = true;
+	uint32_t sharedBuffIdx = 0;
+	uint32_t dispBuffX = 0;
 	while(true){
-		//Wait for both CPUs to be ready
-		if(!(sharedBuff.M7_Done && sharedBuff.M4_Done)) {
-			//Switch buffers and do synchronization tasks
-			swapBuffers();
-			sharedBuff.M4_Done = false;
-			signal_M7();
+		//Wait for successful buffer swap
+		if (sharedBuff.M4_Done)
+			while(!try_syncBufferSwap());
 
-			//Wait for M4 to be ready
-			while(!M7_Signal) {};
-			M7_Signal = false;
+		struct rxInfo {
+			uint32_t f;
+			uint32_t n;
+		};
 
-			//Do task
+		//TODO IDK WHY THIS DOESN'T WORK SO LETS FIX IT. f DOESN'T INCREMENT CORRECTLY.
+
+		bool copyingData = true;
+		uint32_t f = 0;
+		uint32_t n = 0;
+		const auto copyData = [&](volatile float* buff){
+			for (;f < frames; f++){
+				for (;n < l; n++){
+					X[f][n] = buff[sharedBuffIdx++];
+					if (sharedBuffIdx == buffSize){
+						return rxInfo {f, n + 1};
+					}
+				}
+			}
+			return rxInfo {f,n};
+		};
+
+		while(copyingData){
+			rxInfo info;
+			if (currentBuff == 0){
+				info = copyData(sharedBuff.buff0);
+			}
+			if (currentBuff == 1){
+				info = copyData(sharedBuff.buff1);
+			}
+
+			//If buffer doesn't fill up X array, wait for M7 to be ready to swap then finish filling X data.
+			if (info.f < frames-1 || info.n < l-1){
+				sharedBuffIdx = 0;
+				sharedBuff.M4_Done = true;
+				while(try_syncBufferSwap()) {}
+			} else {
+				copyingData = false;
+			}
 		}
 
 
+		const float max = 10.0;
+		const float min = 0.0;
+		for (uint32_t  f = 0; f < frames; f++){
+			for (uint32_t i = 0; i < l; i++){
+				X[f][i] = clampThenNormalize(X[f][i], min, max);
+				specRGB[f][i] = genColor(lowMsh, highMsh, X[f][i]);
+			}
+		}
+
+		const uint32_t sizeX = 4;
+		const uint32_t sizeY = 4;
+		for (uint32_t f = 0; f < frames; f++){
+			uint32_t xIdx = f * sizeX + dispBuffX;
+			for (uint32_t i = 0; i < l; i++){
+				uint32_t yIdx = i * sizeY;
+				uint16_t data = _REV16(specRGB[f][i].data);
+				for (uint32_t y = yIdx; y < sizeY + yIdx; y++){
+					for (uint32_t x = xIdx; x < sizeX + xIdx; x++){
+						displayBuffer[y*display.MAX_COLS + x] = data;
+					}
+				}
+			}
+		}
+		dispBuffX = dispBuffX + frames * sizeX;
+		dispBuffX = dispBuffX % display.MAX_COLS;
+
+		sendDisplayBuffer();
 	}
 }
 

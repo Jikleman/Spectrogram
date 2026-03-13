@@ -7,6 +7,7 @@
 
 #define MATH_PI 3.14159265358979323846264338327950288419716939937510f
 
+//Returns the floor of log base 2 of x
 uint32_t log2floor(uint32_t x){
 	uint32_t res = 0;
 	while (!( (x>>res)&1) ){
@@ -31,6 +32,7 @@ struct complex {
 	float imag;
 };
 
+//Swap function for complex numbers
 void swap(complex& x, complex& y){
 	float tempReal = x.real;
 	float tempImag = x.imag;
@@ -40,6 +42,7 @@ void swap(complex& x, complex& y){
 	y.imag = tempImag;
 }
 
+//Reverse permutes an array of length N. M is logbase2(N)
 void reversePermute(complex x[], unsigned N, unsigned M){
     uint32_t revN;
     for (uint32_t n = 0; n < N/2; n++){
@@ -127,12 +130,14 @@ void rfft(complex x[], complex y[]){
     }
 }
 
+//Generates a hanning window of length M within the array w
 void hanning(int M, float w[]){
     for (int m = 0; m < M; m++){
         w[m] = 0.5f - 0.5f*cosf((2*MATH_PI*m)/(M-1));
     }
 }
 
+//Computes N magnitudes from a complex array x to a float array res.
 void magnitude(complex x[], float res[], uint32_t N){
     for (uint32_t n = 0; n < N; n++){
         res[n] = sqrtf(powf(x[n].real, 2.0f) + powf(x[n].imag, 2.0f));

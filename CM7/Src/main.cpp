@@ -19,8 +19,8 @@
 //Make sure both cores have the same buffSize
 //4096 words (16Kb) per buffer
 volatile bool M4_Signal;
-const uint32_t buffCol = 128;
-const uint32_t buffRow = 4;
+const uint32_t buffCol = 10;
+const uint32_t buffRow = 10;
 const uint32_t buffSize = buffCol * buffRow;
 template <typename T, uint32_t buffSize>
 struct dBuff{
@@ -33,13 +33,6 @@ volatile shared dBuff<float, buffSize> sharedBuff;
 uint32_t currentBuff;
 
 //Global Variables
-
-//const uint32_t N = 256;
-//const uint32_t L = 128;
-//const uint32_t O = 32;
-//
-//static_assert(N > L, "N cannot be less than L");
-//static_assert(L > O, "FFT length (L) cannot be less than overlap (O)");
 
 uint32_t adcBuff;
 
@@ -100,6 +93,90 @@ void HSEM0_IRQHandler(void){
 }
 }
 
+
+//	const static auto moveData = [&f,&n, &txBuff](volatile float* sharedBuff) -> txState{
+//		while (true){
+//			sharedBuff[sharedBuffIdx++] = txBuff[f][n++];
+//
+//			if (sharedBuffIdx == buffSize){
+//				return txState {f,n};
+//			}
+//
+//			if (n >= frameLen){
+//				n = 0;
+//				f++;
+//				if (f >= frames)
+//					return txState {f,n};
+//			}
+//		}
+//	};
+
+struct txParams {
+	uint32_t frames;
+	uint32_t frameLen;
+};
+
+//TODO work on this. Don't forget the one on the M4 too. Walk through logic until its good.
+//Assume that this will continue until our txBuffer has been fully copied
+template <uint32_t frames, uint32_t frameLen>
+void txSharedData(float (&txBuff)[frames][frameLen]){
+	struct txState {
+		uint32_t f;
+		uint32_t n;
+	};
+
+	static uint32_t sharedBuffIdx = 0;
+	txState state = {0, 0};
+
+	//Lambda for moving data to shared buffer. Used for return and capture functionality
+	const auto txCopyData = [&state, &txBuff](volatile float* sharedBuff) -> txState{
+		uint32_t f = state.f;
+		uint32_t n = state.n;
+
+		//Finish sending remaining data in frame
+		for (n = state.n; n < frameLen; n++){
+			sharedBuff[sharedBuffIdx++] = txBuff[f][n];
+			if (sharedBuffIdx == buffSize){
+				if (n + 1 == frameLen)
+					return txState {f + 1, 0};
+				return txState {f, n + 1};
+			}
+		}
+		f++;
+
+	    //Start from fresh frame
+		for (; f < frames; f++){
+			for (n = 0; n < frameLen; n++){
+				sharedBuff[sharedBuffIdx++] = txBuff[f][n];
+				if (sharedBuffIdx == buffSize){
+					if (n + 1 == frameLen)
+						return txState {f + 1, 0};
+					return txState {f, n + 1};
+				}
+			}
+		}
+		return txState {frames, 0};
+	};
+
+	while(true){
+		if (currentBuff == 0){
+			state = txCopyData(sharedBuff.buff0);
+		}
+		if (currentBuff == 1){
+			state = txCopyData(sharedBuff.buff1);
+		}
+
+		//If buffer is full, wait to swap buffers with M4 then finish sending data.
+		if (state.f < frames){
+			sharedBuffIdx = 0;
+			sharedBuff.M7_Done = true;
+			while(!try_syncBufferSwap()) {}
+		} else {
+			break;
+		}
+	}
+}
+
 int main(void)
 {
 	//	reallocPeripheral(APB1L_Peripheral::tim3);
@@ -134,7 +211,7 @@ int main(void)
 		x[n] = cosf(theta * k);
 		k++;
 	}
-	uint32_t sharedBuffIdx = 0;
+//	uint32_t sharedBuffIdx = 0;
 	const static auto calcSpec = [&](){
 		//Compute spectrogram
 		for (uint32_t f = 0; f < frames; f++){
@@ -163,47 +240,7 @@ int main(void)
 	while(true){
 		calcSpec();
 		prepare_x();
-
-		bool transferingData = true;
-		uint32_t f = 0;
-		uint32_t n = 0;
-
-		struct excessDataInfo{
-			uint32_t f;
-			uint32_t n;
-		};
-
-		//Lambda for moving data to shared buffer. Used for return and capture functionality
-		const static auto moveData = [&](volatile float* buff) -> excessDataInfo{
-			for (;f < frames; f++){
-				for (;n < l; n++){
-					buff[sharedBuffIdx++] = X[f][n];
-					if (sharedBuffIdx == buffSize){
-						return excessDataInfo {f, n + 1};
-					}
-				}
-			}
-			return excessDataInfo {f,n};
-		};
-
-		while(transferingData){
-			excessDataInfo info;
-			if (currentBuff == 0){
-				info = moveData(sharedBuff.buff0);
-			}
-			if (currentBuff == 1){
-				info = moveData(sharedBuff.buff1);
-			}
-
-			//If buffer is full, wait to swap buffers with M4 then finish sending data.
-			if (info.f < (frames-1) || info.n < (l-1)){
-				sharedBuffIdx = 0;
-				sharedBuff.M7_Done = true;
-				while(!try_syncBufferSwap()) {}
-			} else {
-				transferingData = false;
-			}
-		}
+		txSharedData<frames, l>(X);
 	}
 }
 

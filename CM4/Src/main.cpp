@@ -14,8 +14,8 @@
 //Make sure both cores have the same buffSize
 //4096 words (16Kb) per buffer
 volatile bool M7_Signal;
-const uint32_t buffCol = 128;
-const uint32_t buffRow = 4;
+const uint32_t buffCol = 10;
+const uint32_t buffRow = 10;
 const uint32_t buffSize = buffCol * buffRow;
 template <typename T, uint32_t buffSize>
 struct dBuff{
@@ -91,6 +91,66 @@ void HSEM1_IRQHandler(void){
 
 #define CPACR				(*(volatile unsigned int *) 0xE000ED88)
 
+//TODO work on this. M7 one has had more work. This one needs work.
+//Assume that this will continue until our rxBuffer is full.
+template <uint32_t frames, uint32_t frameLen>
+void rxSharedData(float (&rxBuff)[frames][frameLen]){
+	struct rxState {
+		uint32_t f;
+		uint32_t n;
+	};
+
+	static uint32_t sharedBuffIdx = 0;
+	rxState state = {0,0};
+
+	const auto rxCopyData = [&state, &rxBuff](volatile float* sharedBuff) -> rxState{
+		uint32_t f = state.f;
+		uint32_t n = state.n;
+
+		//Finish receiving remaining data in frame
+		for (n = state.n; n < frameLen; n++){
+			rxBuff[f][n] = sharedBuff[sharedBuffIdx++];
+			if (sharedBuffIdx == buffSize){
+				if (n + 1 == frameLen)
+					return rxState {f + 1, 0};
+				return rxState {f, n + 1};
+			}
+		}
+		f++;
+
+		//Start from fresh frame
+		for (; f < frames; f++){
+			for (n = 0; n < frameLen; n++){
+				rxBuff[f][n] = sharedBuff[sharedBuffIdx++];
+				if (sharedBuffIdx == buffSize){
+					if (n + 1 == frameLen)
+						return rxState {f + 1, 0};
+					return rxState {f, n + 1};
+				}
+			}
+		}
+		return rxState {frames, 0};
+	};
+
+	while(true){
+		if (currentBuff == 0){
+			state = rxCopyData(sharedBuff.buff0);
+		}
+		if (currentBuff == 1){
+			state = rxCopyData(sharedBuff.buff1);
+		}
+
+		//If there are remaining frames, wait to swap buffers with M7 then finish copying data
+		if (state.f < frames){
+			sharedBuffIdx = 0;
+			sharedBuff.M4_Done = true;
+			while(!try_syncBufferSwap()) {}
+		} else {
+			break;
+		}
+	}
+}
+
 int main(void)
 {
 	//Set full access privilege to enable FPU
@@ -117,53 +177,9 @@ int main(void)
 	syncInit();
 
 	sharedBuff.M4_Done = true;
-	uint32_t sharedBuffIdx = 0;
 	uint32_t dispBuffX = 0;
 	while(true){
-		//Wait for successful buffer swap
-		if (sharedBuff.M4_Done)
-			while(!try_syncBufferSwap());
-
-		struct rxInfo {
-			uint32_t f;
-			uint32_t n;
-		};
-
-		//TODO IDK WHY THIS DOESN'T WORK SO LETS FIX IT. f DOESN'T INCREMENT CORRECTLY.
-
-		bool copyingData = true;
-		uint32_t f = 0;
-		uint32_t n = 0;
-		const auto copyData = [&](volatile float* buff){
-			for (;f < frames; f++){
-				for (;n < l; n++){
-					X[f][n] = buff[sharedBuffIdx++];
-					if (sharedBuffIdx == buffSize){
-						return rxInfo {f, n + 1};
-					}
-				}
-			}
-			return rxInfo {f,n};
-		};
-
-		while(copyingData){
-			rxInfo info;
-			if (currentBuff == 0){
-				info = copyData(sharedBuff.buff0);
-			}
-			if (currentBuff == 1){
-				info = copyData(sharedBuff.buff1);
-			}
-
-			//If buffer doesn't fill up X array, wait for M7 to be ready to swap then finish filling X data.
-			if (info.f < frames-1 || info.n < l-1){
-				sharedBuffIdx = 0;
-				sharedBuff.M4_Done = true;
-				while(try_syncBufferSwap()) {}
-			} else {
-				copyingData = false;
-			}
-		}
+		rxSharedData(X);
 
 
 		const float max = 10.0;
@@ -174,6 +190,8 @@ int main(void)
 				specRGB[f][i] = genColor(lowMsh, highMsh, X[f][i]);
 			}
 		}
+
+		//TODO Check that this is writing frames correctly.
 
 		const uint32_t sizeX = 4;
 		const uint32_t sizeY = 4;

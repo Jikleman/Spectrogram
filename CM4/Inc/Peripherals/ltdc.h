@@ -1,3 +1,5 @@
+#pragma once
+
 #include <stdint.h>
 
 #define LTDC_BASE		0x50001000

@@ -47,3 +47,5 @@ bool HSEM_readC1MaskedFlag(uint8_t semaphore);
 bool HSEM_readC2MaskedFlag(uint8_t semaphore);
 void HSEM_clearC1Flag(uint8_t semaphore);
 void HSEM_clearC2Flag(uint8_t semaphore);
+
+HSEM_CoreID HSEM_getCoreID();

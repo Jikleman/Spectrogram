@@ -86,3 +86,12 @@ void HSEM_unlockAllSemaphores(HSEM_CoreID coreId, uint16_t key){
 void HSEM_setKey(uint16_t key){
 	HSEM->KEYR = (key<<KEY_BIT);
 }
+
+HSEM_CoreID HSEM_getCoreID(){
+	const uint32_t SCB_CPUID = *((volatile uint32_t *) 0xE000ED00);
+	if (((SCB_CPUID >> 4) & 0x0000000F) == 7){
+		return HSEM_CoreID::MASTER0;
+	} else {
+		return HSEM_CoreID::MASTER1;
+	}
+}

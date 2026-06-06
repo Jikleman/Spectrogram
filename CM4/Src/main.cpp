@@ -1,217 +1,133 @@
-#include <stdint.h>
-#include <cmath>
-#include <st7789v3.h>
-#include <color.h>
-
-#include <rcc.h>
+#include <dma2d.h>
 #include <hsem.h>
 #include <nvic.h>
-#include <dma2d.h>
+#include <rcc.h>
 
-#define shared __attribute__ ((section(".shared_memory")))
+#include <double_buffer.h>
+#include <cmath>
+#include <color.h>
+#include <st7789v3.h>
+#include <stdint.h>
 
-//Shared data
-//Make sure both cores have the same buffSize
-//4096 words (16Kb) per buffer
-volatile bool M7_Signal;
-const uint32_t buffCol = 10;
-const uint32_t buffRow = 10;
-const uint32_t buffSize = buffCol * buffRow;
-template <typename T, uint32_t buffSize>
-struct dBuff{
-	volatile bool M7_Done;
-	volatile bool M4_Done;
-	volatile T buff0[buffSize];
-	volatile T buff1[buffSize];
-};
-volatile shared dBuff<float, buffSize> sharedBuff;
-uint32_t currentBuff;
+	constexpr uint32_t L = 256;
+	constexpr uint32_t l = L/2 + 1; //Only the first half + 1 of each frame is needed for the spectrogram
+
+	const uint32_t size_x = 5;
+	const uint32_t size_y = 2;
+
 
 //Global Variables
-
 st7789v3 display;
 uint16_t displayBuffer[display.MAX_COLS * display.MAX_ROWS];
 
-//Function prototypes
+const uint32_t tx_hsem = 0;
+const uint32_t rx_hsem = 1;
+const uint32_t dbuff_len = 512;
+shared double_buffer<float, dbuff_len> dbuff(tx_hsem, rx_hsem);
 
+//Function prototypes
 void sendDisplayBuffer();
 void dma2dTest();
 void displayColorMap(Msh lowMsh, Msh highMsh);
+
 float clampThenNormalize(float x, const float min, const float max);
 rgb565 genColor(Msh lowMsh, Msh highMsh, float x);
 uint16_t _REV16(const uint16_t x);
+
 void init_st7789v3();
-
-void signal_M7();
-void swapBuffers();
-
-/*Attempts to swap between the shared buffers.
-* If M7 is not ready for swap, swap fails and false is returned.
-* True is returned on a successful swap.
-*/
-bool try_syncBufferSwap(){
-	//Check if both CPUs are ready
-	if(sharedBuff.M7_Done && sharedBuff.M4_Done) {
-		//Switch buffers and do synchronization tasks
-		swapBuffers();
-		signal_M7();
-
-		//Wait for M4 to be ready
-		while(!M7_Signal) {};
-		M7_Signal = false;
-		sharedBuff.M4_Done = false;
-
-		return true;
-	}
-	return false;
-}
-
-//Contains M4 initialization for buffer synchronization
-void syncInit(){
-	reallocPeripheral(AHB4_Peripheral::hsem);
-	nvic_enableItr(H755_itrPos::hsem1);
-	HSEM_enableC2Itr(0);
-
-	//Wait for M7 to be ready
-	while(!HSEM_isC1ItrEnabled(1));
-
-	M7_Signal = false;
-	currentBuff = 0;
-	sharedBuff.M4_Done = false;
-}
+void M4_startup_sync();
 
 //IRQ handlers
-
 extern "C"{
 void HSEM1_IRQHandler(void){
-	M7_Signal = true;
-	HSEM_clearC2Flag(0);
+
 }
 }
 
 #define CPACR				(*(volatile unsigned int *) 0xE000ED88)
 
-//TODO work on this. M7 one has had more work. This one needs work.
-//Assume that this will continue until our rxBuffer is full.
-template <uint32_t frames, uint32_t frameLen>
-void rxSharedData(float (&rxBuff)[frames][frameLen]){
-	struct rxState {
-		uint32_t f;
-		uint32_t n;
-	};
-
-	static uint32_t sharedBuffIdx = 0;
-	rxState state = {0,0};
-
-	const auto rxCopyData = [&state, &rxBuff](volatile float* sharedBuff) -> rxState{
-		uint32_t f = state.f;
-		uint32_t n = state.n;
-
-		//Finish receiving remaining data in frame
-		for (n = state.n; n < frameLen; n++){
-			rxBuff[f][n] = sharedBuff[sharedBuffIdx++];
-			if (sharedBuffIdx == buffSize){
-				if (n + 1 == frameLen)
-					return rxState {f + 1, 0};
-				return rxState {f, n + 1};
-			}
-		}
-		f++;
-
-		//Start from fresh frame
-		for (; f < frames; f++){
-			for (n = 0; n < frameLen; n++){
-				rxBuff[f][n] = sharedBuff[sharedBuffIdx++];
-				if (sharedBuffIdx == buffSize){
-					if (n + 1 == frameLen)
-						return rxState {f + 1, 0};
-					return rxState {f, n + 1};
-				}
-			}
-		}
-		return rxState {frames, 0};
-	};
-
-	while(true){
-		if (currentBuff == 0){
-			state = rxCopyData(sharedBuff.buff0);
-		}
-		if (currentBuff == 1){
-			state = rxCopyData(sharedBuff.buff1);
-		}
-
-		//If there are remaining frames, wait to swap buffers with M7 then finish copying data
-		if (state.f < frames){
-			sharedBuffIdx = 0;
-			sharedBuff.M4_Done = true;
-			while(!try_syncBufferSwap()) {}
-		} else {
-			break;
-		}
-	}
-}
-
 int main(void)
 {
+	M4_startup_sync();
+
 	//Set full access privilege to enable FPU
 	CPACR |= (0xF << 20);
 
-	Msh highMsh = RGB2Msh(invsRGBCompanding(rgb565(27,5,2)));
-	Msh lowMsh = RGB2Msh(invsRGBCompanding(rgb565(3,7,24)));
-
-	constexpr uint32_t N = 512;
-	constexpr uint32_t L = 128;
-	constexpr uint32_t O = 64;
-	constexpr uint32_t H = L - O;
-	constexpr uint32_t frames = 1 + (N-L) / (H);
-	constexpr uint32_t l = L/2 + 1; //Only the first half + 1 of each frame is needed for the spectrogram
-
-	rgb565 specRGB[frames][l];
-	static float X[frames][l];
-
 	init_st7789v3();
 
-	//Black out screen
 	display.fill(0x0000);
 
-	syncInit();
+	const Msh highMsh = RGB2Msh(invsRGBCompanding(rgb565(27,5,2)));
+	const Msh lowMsh = RGB2Msh(invsRGBCompanding(rgb565(3,7,24)));
 
-	sharedBuff.M4_Done = true;
-	uint32_t dispBuffX = 0;
+	const float max = 5.0f;
+	const float min = 0.0f;
+
+	float X[dbuff_len];
+	uint16_t spec_frame[l];
+	uint32_t n = 0;
+	uint32_t x_cur = 0;
 	while(true){
-		rxSharedData(X);
+		dbuff.rx_swap_ready();
+		dbuff.rx_read(X, 0, dbuff_len);
 
+		for (uint32_t i = 0; i < dbuff_len; i++){
+			float normalized_data = clampThenNormalize(X[i], min, max);
+			uint16_t frame_data = genColor(lowMsh, highMsh, normalized_data).data;
+			spec_frame[n++] = _REV16(frame_data);
 
-		const float max = 10.0;
-		const float min = 0.0;
-		for (uint32_t  f = 0; f < frames; f++){
-			for (uint32_t i = 0; i < l; i++){
-				X[f][i] = clampThenNormalize(X[f][i], min, max);
-				specRGB[f][i] = genColor(lowMsh, highMsh, X[f][i]);
-			}
-		}
-
-		//TODO Check that this is writing frames correctly.
-
-		const uint32_t sizeX = 4;
-		const uint32_t sizeY = 4;
-		for (uint32_t f = 0; f < frames; f++){
-			uint32_t xIdx = f * sizeX + dispBuffX;
-			for (uint32_t i = 0; i < l; i++){
-				uint32_t yIdx = i * sizeY;
-				uint16_t data = _REV16(specRGB[f][i].data);
-				for (uint32_t y = yIdx; y < sizeY + yIdx; y++){
-					for (uint32_t x = xIdx; x < sizeX + xIdx; x++){
-						displayBuffer[y*display.MAX_COLS + x] = data;
+			if (n == l){
+				for (uint32_t j = 0; j < l; j++){
+					uint32_t y_cur = j * size_y;
+					for (uint32_t y = y_cur; y < size_y + y_cur; y++){
+						for (uint32_t x = x_cur; x < size_x + x_cur; x++){
+							displayBuffer[y*display.MAX_COLS + (x % display.MAX_COLS)] = spec_frame[j];
+						}
 					}
 				}
+				n = 0;
+				x_cur += size_x;
+				x_cur %= display.MAX_COLS;
+				sendDisplayBuffer();
 			}
 		}
-		dispBuffX = dispBuffX + frames * sizeX;
-		dispBuffX = dispBuffX % display.MAX_COLS;
-
-		sendDisplayBuffer();
 	}
+
+
+//	uint32_t dispBuffX = 0;
+//	while(true){
+//		//double buffer swap goes here
+//		dbuff.rx_swap_ready();
+//		dbuff.rx_read(X, 0, 10);
+//
+//		const float max = 10.0;
+//		const float min = 0.0;
+//
+//		for (uint32_t  f = 0; f < frames; f++){
+//			for (uint32_t i = 0; i < l; i++){
+//				X[f][i] = clampThenNormalize(X[f][i], min, max);
+//				specRGB[f][i] = genColor(lowMsh, highMsh, X[f][i]);
+//			}
+//		}
+//		const uint32_t sizeX = 4;
+//		const uint32_t sizeY = 4;
+//		for (uint32_t f = 0; f < frames; f++){
+//			uint32_t xIdx = f * sizeX + dispBuffX;
+//			for (uint32_t i = 0; i < l; i++){
+//				uint32_t yIdx = i * sizeY;
+//				uint16_t data = _REV16(specRGB[f][i].data);
+//				for (uint32_t y = yIdx; y < sizeY + yIdx; y++){
+//					for (uint32_t x = xIdx; x < sizeX + xIdx; x++){
+//						displayBuffer[y*display.MAX_COLS + x] = data;
+//					}
+//				}
+//			}
+//		}
+//		dispBuffX = dispBuffX + frames * sizeX;
+//		dispBuffX = dispBuffX % display.MAX_COLS;
+//
+//		sendDisplayBuffer();
+//	}
 }
 
 void init_st7789v3(){
@@ -347,14 +263,12 @@ uint16_t _REV16(const uint16_t x){
 	return res;
 }
 
-void signal_M7(){
-	HSEM_readLock(HSEM_CoreID::MASTER1, 1);
-	HSEM_unlock(HSEM_CoreID::MASTER1, 0, 1);
-}
+void M4_startup_sync(){
+	//Wait for M7 to be ready
+	while(!HSEM_isC1ItrEnabled(0));
+	allocatePeripheral(AHB4_Peripheral::hsem);
+	HSEM_disableC1Itr(0);
 
-void swapBuffers(){
-	if (currentBuff == 0)
-		currentBuff = 1;
-	else if (currentBuff == 1)
-		currentBuff = 0;
+	//Signal M7
+	HSEM_enableC2Itr(0);
 }

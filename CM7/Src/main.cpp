@@ -1,85 +1,40 @@
-#include <stdint.h>
-#include <nvic.h>
-#include <rcc.h>
 #include <adc.h>
-#include <tim2345.h>
-#include <gpio.h>
 #include <dma.h>
 #include <dmamux.h>
+#include <gpio.h>
 #include <hsem.h>
+#include <nvic.h>
+#include <rcc.h>
+#include <tim2345.h>
 
-#include <fft.h>
 #include <cmath>
+#include <double_buffer.h>
+#include <fft.h>
+#include <stdint.h>
 
-#define shared	__attribute__ ((section(".shared_memory")))
 #define dtcm	__attribute__ ((section(".dtcm_ram")))
 
 
-//Shared data
-//Make sure both cores have the same buffSize
-//4096 words (16Kb) per buffer
-volatile bool M4_Signal;
-const uint32_t buffCol = 10;
-const uint32_t buffRow = 10;
-const uint32_t buffSize = buffCol * buffRow;
-template <typename T, uint32_t buffSize>
-struct dBuff{
-	volatile bool M7_Done;
-	volatile bool M4_Done;
-	volatile T buff0[buffSize];
-	volatile T buff1[buffSize];
-};
-volatile shared dBuff<float, buffSize> sharedBuff;
-uint32_t currentBuff;
+	constexpr uint32_t N = 512;
+	constexpr uint32_t L = 256;
+	constexpr uint32_t O = 64;
+	constexpr uint32_t H = L - O;
+	constexpr uint32_t frames = 1 + (N-L) / (H);
+	constexpr uint32_t l = L/2 + 1; //Only the first half + 1 of each frame is needed for the spectrogram
 
 //Global Variables
-
 uint32_t adcBuff;
 
+const uint32_t tx_hsem = 0;
+const uint32_t rx_hsem = 1;
+const uint32_t dbuff_len = 512;
+shared double_buffer<float, dbuff_len> dbuff(tx_hsem, rx_hsem);
+
 //Function Prototypes
-
-void init_st7789v3();
 void init_ADC();
-
-void swapBuffers();
-void signal_M4();
-
-/*Attempts to swap between the shared buffers.
-* If M4 is not ready for swap, swap fails and false is returned.
-* True is returned on a successful swap.
-*/
-bool try_syncBufferSwap(){
-	//Check if both CPUs are ready
-	if(sharedBuff.M7_Done && sharedBuff.M4_Done) {
-		//Switch buffers and do synchronization tasks
-		swapBuffers();
-		signal_M4();
-
-		//Wait for M4 to be ready
-		while(!M4_Signal) {};
-		M4_Signal = false;
-		sharedBuff.M7_Done = false;
-
-		return true;
-	}
-	return false;
-}
-
-//Contains the initialization for shared buffer synchronization
-void syncInit(){
-	//Wait for M4 to be ready
-	while(!HSEM_isC2ItrEnabled(0));
-	allocatePeripheral(AHB4_Peripheral::hsem);
-	nvic_enableItr(H755_itrPos::hsem0);
-	HSEM_enableC1Itr(1);
-
-	M4_Signal = false;
-	currentBuff = 1;
-	sharedBuff.M7_Done = false;
-}
+void M7_startup_sync();
 
 //IRQ handlers
-
 extern "C" {
 void ADC1_2_IRQHandler(void){
 
@@ -88,93 +43,8 @@ void ADC1_2_IRQHandler(void){
 
 extern "C"{
 void HSEM0_IRQHandler(void){
-	M4_Signal = true;
-	HSEM_clearC1Flag(1);
+
 }
-}
-
-
-//	const static auto moveData = [&f,&n, &txBuff](volatile float* sharedBuff) -> txState{
-//		while (true){
-//			sharedBuff[sharedBuffIdx++] = txBuff[f][n++];
-//
-//			if (sharedBuffIdx == buffSize){
-//				return txState {f,n};
-//			}
-//
-//			if (n >= frameLen){
-//				n = 0;
-//				f++;
-//				if (f >= frames)
-//					return txState {f,n};
-//			}
-//		}
-//	};
-
-struct txParams {
-	uint32_t frames;
-	uint32_t frameLen;
-};
-
-//TODO work on this. Don't forget the one on the M4 too. Walk through logic until its good.
-//Assume that this will continue until our txBuffer has been fully copied
-template <uint32_t frames, uint32_t frameLen>
-void txSharedData(float (&txBuff)[frames][frameLen]){
-	struct txState {
-		uint32_t f;
-		uint32_t n;
-	};
-
-	static uint32_t sharedBuffIdx = 0;
-	txState state = {0, 0};
-
-	//Lambda for moving data to shared buffer. Used for return and capture functionality
-	const auto txCopyData = [&state, &txBuff](volatile float* sharedBuff) -> txState{
-		uint32_t f = state.f;
-		uint32_t n = state.n;
-
-		//Finish sending remaining data in frame
-		for (n = state.n; n < frameLen; n++){
-			sharedBuff[sharedBuffIdx++] = txBuff[f][n];
-			if (sharedBuffIdx == buffSize){
-				if (n + 1 == frameLen)
-					return txState {f + 1, 0};
-				return txState {f, n + 1};
-			}
-		}
-		f++;
-
-	    //Start from fresh frame
-		for (; f < frames; f++){
-			for (n = 0; n < frameLen; n++){
-				sharedBuff[sharedBuffIdx++] = txBuff[f][n];
-				if (sharedBuffIdx == buffSize){
-					if (n + 1 == frameLen)
-						return txState {f + 1, 0};
-					return txState {f, n + 1};
-				}
-			}
-		}
-		return txState {frames, 0};
-	};
-
-	while(true){
-		if (currentBuff == 0){
-			state = txCopyData(sharedBuff.buff0);
-		}
-		if (currentBuff == 1){
-			state = txCopyData(sharedBuff.buff1);
-		}
-
-		//If buffer is full, wait to swap buffers with M4 then finish sending data.
-		if (state.f < frames){
-			sharedBuffIdx = 0;
-			sharedBuff.M7_Done = true;
-			while(!try_syncBufferSwap()) {}
-		} else {
-			break;
-		}
-	}
 }
 
 int main(void)
@@ -184,17 +54,11 @@ int main(void)
 	//	tim_enable(TIM3);
 	//	init_ADC();
 	//	adc_start(ADC1);
+	M7_startup_sync();
 
 	uint32_t Fs = 10000;
 	uint32_t freq = 1000;
 	float theta = (2.0f * MATH_PI * freq) / Fs;
-
-	constexpr uint32_t N = 512;
-	constexpr uint32_t L = 128;
-	constexpr uint32_t O = 64;
-	constexpr uint32_t H = L - O;
-	constexpr uint32_t frames = 1 + (N-L) / (H);
-	constexpr uint32_t l = L/2 + 1; //Only the first half + 1 of each frame is needed for the spectrogram
 
 	static dtcm float x[N];
 	static dtcm float w[L];
@@ -203,15 +67,12 @@ int main(void)
 
 	hanning(L, w);
 
-	//Wait for M4 to be ready then signal to M4
-	syncInit();
-
 	uint32_t k = 0;
 	for (uint32_t n = 0; n < N; n++){
 		x[n] = cosf(theta * k);
 		k++;
 	}
-//	uint32_t sharedBuffIdx = 0;
+
 	const static auto calcSpec = [&](){
 		//Compute spectrogram
 		for (uint32_t f = 0; f < frames; f++){
@@ -237,10 +98,32 @@ int main(void)
 		}
 	};
 
+	float value = 0;
+	float buff[dbuff_len];
+	uint32_t buff_idx = 0;
 	while(true){
-		calcSpec();
-		prepare_x();
-		txSharedData<frames, l>(X);
+//		calcSpec();
+//		prepare_x();
+		for (uint32_t i = 0; i < l; i++){
+			buff[buff_idx] = 0.0;
+			if (i == l/2){
+				buff[buff_idx] = value;
+				value += .25;
+				if (value > 5.0){
+					value = 0;
+				}
+			}
+			buff_idx++;
+			if (buff_idx == dbuff_len){
+				dbuff.tx_write(buff, 0, dbuff_len);
+				dbuff.tx_swap_ready();
+				buff_idx = 0;
+			}
+		}
+//		for (uint32_t f = 0; f < frames; f++){
+//			dbuff.tx_write(X[f], 0, dbuff_len);
+//			dbuff.tx_swap_ready();
+//		}
 	}
 }
 
@@ -297,16 +180,15 @@ void init_ADC(){
 	dma1_enableStream(DMA_Stream::Stream1);
 }
 
-void swapBuffers(){
-	if (currentBuff == 0)
-		currentBuff = 1;
-	else if (currentBuff == 1)
-		currentBuff = 0;
-}
+void M7_startup_sync(){
+	reallocPeripheral(AHB4_Peripheral::hsem);
 
-void signal_M4(){
-	HSEM_readLock(HSEM_CoreID::MASTER0, 0);
-	HSEM_unlock(HSEM_CoreID::MASTER0, 0, 0);
+	//Signal to M4 to proceed
+	HSEM_enableC1Itr(0);
+
+	//Wait for M4 to be ready
+	while(!HSEM_isC2ItrEnabled(0));
+	HSEM_disableC2Itr(0);
 }
 
 //void spectrogramTest(){

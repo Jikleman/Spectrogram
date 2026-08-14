@@ -1,10 +1,5 @@
 #pragma once
 
-enum class SysCPU {
-    CurrentCPU = 0,
-    M7 = 1,             //M7 is specifically called CPU1 in documentation
-    M4 = 2              //M4 is specifically called CPU2 in documentation
-};
 enum class AHB3 {
     mdma = 0,
     dma2d = 4,

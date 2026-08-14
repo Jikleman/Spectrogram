@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include "rcc_enums.h"
 
+//RCC does not have implementations for everything RCC related. just allocating and reseting peripherals until more functionality is needed.
+
 namespace dd {
 
 struct rcc_def {
@@ -113,9 +115,41 @@ struct rcc_def {
     volatile uint32_t C2_APB2LPENR;             // C2 APB2 sleep clock
     volatile uint32_t C2_APB4LPENR;             // C2 APB4 sleep clock
     volatile int32_t Reserved13[3];                     // Reserved field
+
+    //Allocates peripheral specifically for M4 (CPU2)
+    template<typename T>
+    void allocate_peripheral_M4(T peripheral);
+
+    //Allocates peripheral specifically for M7 (CPU1)
+    template<typename T>
+    void allocate_peripheral_M7(T peripheral);
+
+    //Allocates peripheral for current CPU
+    template<typename T>
+    void allocate_peripheral(T peripheral);
+
+    //Deallocates peripheral specifically for M4 (CPU2)
+    template<typename T>
+    void deallocate_peripheral_M4(T peripheral);
+
+    //Deallocates peripheral specifically for M7 (CPU1)
+    template<typename T>
+    void deallocate_peripheral_M7(T peripheral);
+
+    //Deallocates peripheral for current CPU
+    template<typename T>
+    void deallocate_peripheral(T peripheral);
+
+    //Resets peripheral's configurations back to initial state
+    template<typename T>
+    void reset_peripheral(T peripheral);
+
+    //Checks if the peripheral has been allocated by either CPU
+    template<typename T>
+    bool is_peripheral_allocated(T peripheral);
 };
 
 #define RCC_Base        (0x58024400)
-#define RCC             (*(rcc_def *) RCC_Base)
+#define RCC             (*(dd::rcc_def *) RCC_Base)
 
 };

@@ -1,10 +1,11 @@
+#pragma once
+
 enum class SysCPU {
     CurrentCPU = 0,
     M7 = 1,             //M7 is specifically called CPU1 in documentation
     M4 = 2              //M4 is specifically called CPU2 in documentation
 };
-
-enum class AHB3_Peripheral {
+enum class AHB3 {
     mdma = 0,
     dma2d = 4,
     jpgdec = 5,
@@ -12,7 +13,7 @@ enum class AHB3_Peripheral {
     quadSPI = 14,
     sdmmc1 = 16
 };
-enum class AHB1_Peripheral {
+enum class AHB1 {
     dma1 = 0,
     dma2 = 1,
     adc1_adc2 = 5,
@@ -25,7 +26,7 @@ enum class AHB1_Peripheral {
     usb2_otg = 27,
     usb_phy2 = 28
 };
-enum class AHB2_Peripheral {
+enum class AHB2 {
     dcmi = 0,
     crypt = 4,
     hash = 5,
@@ -33,7 +34,7 @@ enum class AHB2_Peripheral {
     sdmmc2 = 9,
 
 };
-enum class AHB4_Peripheral {
+enum class AHB4 {
     gpioa = 0,
     gpiob = 1,
     gpioc = 2,
@@ -51,12 +52,12 @@ enum class AHB4_Peripheral {
     hsem = 25,
     backupRam = 28
 };
-enum class APB3_Peripheral{
+enum class APB3 {
     ltdc = 3,
     dsi = 4,
     wwdg1 = 6               //Not recommended to enable this for CPU2
 };
-enum class APB1L_Peripheral{
+enum class APB1L {
     tim2 = 0,
     tim3 = 1,
     tim4 = 2,
@@ -83,14 +84,14 @@ enum class APB1L_Peripheral{
     uart7 = 30,
     uart8 = 31
 };
-enum class APB1H_Peripheral{
+enum class APB1H {
     clockRecoverySystem = 1,
     swpmi = 2,
     opamp = 4,
     mdios = 5,
     fdcan = 8
 };
-enum class APB2_Peripheral{
+enum class APB2 {
     tim1 = 0,
     tim8 = 1,
     usart1 = 4,
@@ -107,7 +108,7 @@ enum class APB2_Peripheral{
     dfsdm1 = 28,
     hrtim = 29
 };
-enum class APB4_Peripheral{
+enum class APB4 {
     syscfg  = 1,
     lpuart1 = 3,
     spi6 = 5,
@@ -121,3 +122,17 @@ enum class APB4_Peripheral{
     rtcapb = 16,            //This is enabled by default
     sai4 = 17
 };
+
+
+//Template traits for the peripheral buses.
+template <typename T> struct peripheral_bus;
+template<> struct peripheral_bus<AHB3>  { static constexpr int index = 0; };
+template<> struct peripheral_bus<AHB1>  { static constexpr int index = 1; };
+template<> struct peripheral_bus<AHB2>  { static constexpr int index = 2; };
+template<> struct peripheral_bus<AHB4>  { static constexpr int index = 3; };
+template<> struct peripheral_bus<APB3>  { static constexpr int index = 4; };
+template<> struct peripheral_bus<APB1L> { static constexpr int index = 5; };
+template<> struct peripheral_bus<APB1H> { static constexpr int index = 6; };
+template<> struct peripheral_bus<APB2>  { static constexpr int index = 7; };
+template<> struct peripheral_bus<APB4>  { static constexpr int index = 8; };
+

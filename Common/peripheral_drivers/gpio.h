@@ -1,6 +1,5 @@
 #pragma once
 
-#include "bitwise_functions.h"
 #include <stdint.h>
 
 namespace dd {

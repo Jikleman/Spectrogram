@@ -1,5 +1,5 @@
 #include "gpio.h"
-#include "bitwise_functions.h"
+#include "./utils/bitwise_functions.h"
 
 //Configures the pin mode for a gpio pin
 void dd::gpio_def::conf_pin_mode(gpio_pin pin, gpio_pin_mode mode){

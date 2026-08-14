@@ -3,9 +3,13 @@
 
 #include <stdint.h>
 
+volatile bool x = true;
+
 int main(void)
 {
-	GPIOA.reset_pin(dd::gpio_pin::P0);
+	x = RCC.is_peripheral_allocated(AHB4::gpioa);
+	RCC.allocate_peripheral(AHB4::gpiob);
+	x = RCC.is_peripheral_allocated(AHB4::gpiob);
     /* Loop forever */
 	for(;;);
 }

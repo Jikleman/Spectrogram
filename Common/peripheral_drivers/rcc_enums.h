@@ -1,5 +1,7 @@
 #pragma once
 
+namespace dd {
+
 enum class AHB3 {
     mdma = 0,
     dma2d = 4,
@@ -131,3 +133,4 @@ template<> struct peripheral_bus<APB1H> { static constexpr int index = 6; };
 template<> struct peripheral_bus<APB2>  { static constexpr int index = 7; };
 template<> struct peripheral_bus<APB4>  { static constexpr int index = 8; };
 
+};
